@@ -43,13 +43,11 @@ Data flow:
 
 ## What It Does
 
-1. `robot_driver` randomly places a red ball within a reachable workspace.
-2. The ball's physical position is published to `target_position`.
-3. `camera_publisher` maps the physical position to pixel coordinates and
-   draws the ball on a synthetic image.
+1. `robot_driver` randomly places 3 red balls within a reachable workspace, avoiding the box area.
+2. The ball positions are published to `target_position`.
+3. `camera_publisher` maps the physical position to pixel coordinates and draws the balls on a synthetic image.
 4. `vision_to_arm` detects the red ball and sends a grasp command.
-5. `robot_driver` opens the gripper, moves through three waypoints, closes the
-   gripper, lifts the ball, transports it to a random position, and releases it.
+5. `robot_driver` opens the gripper, moves through three waypoints, closes the gripper, lifts the ball, carries it above the box, and releases it. This repeats for all 3 balls, then the arm returns to home position.
 
 ## Known Limitations
 
