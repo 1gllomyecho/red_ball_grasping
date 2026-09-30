@@ -63,9 +63,20 @@ Data flow:
 - **Gripper range**: The prismatic gripper has limited travel, so it can only
   grasp small objects.
   
-## Demo
 
-![Demo](demo.gif)
+## Changelog
+
+### 2026-09-30
+- Multi-ball sequential grasping (3 balls)
+- Grasp result statistics (success/fail per ball)
+- Box placement (drop balls into a box)
+- Return to home position after all balls are done
+
+## Test Results
+
+Tested 5 consecutive runs, all 3 balls grasped successfully in each run.
+Success rate: 100% (5/5 runs).
+
 
 ## License
 
