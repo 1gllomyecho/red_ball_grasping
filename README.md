@@ -70,10 +70,17 @@ Data flow:
 - Box placement (drop balls into a box)
 - Return to home position after all balls are done
 
+### 2026-10-04
+- Replaced red balls with strawberry models (fruit + stem)
+- Grasp the stem instead of the fruit
+- Fruit fixed to world (simulating stem attached to plant), released after grasp
+- Extra lift before box placement
+- Two-step box placement (high above box, then lower to opening)
+
 ## Test Results
 
-Tested 5 consecutive runs, all 3 balls grasped successfully in each run.
-Success rate: 100% (5/5 runs).
+Tested 3 consecutive runs, all 3 strawberries grasped and placed in the box in each run.
+Success rate: 100% (3/3 runs).
 
 
 ## License
