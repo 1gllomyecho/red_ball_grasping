@@ -43,11 +43,11 @@ Data flow:
 
 ## What It Does
 
-1. `robot_driver` randomly places 3 red balls within a reachable workspace, avoiding the box area.
-2. The ball positions are published to `target_position`.
-3. `camera_publisher` maps the physical position to pixel coordinates and draws the balls on a synthetic image.
-4. `vision_to_arm` detects the red ball and sends a grasp command.
-5. `robot_driver` opens the gripper, moves through three waypoints, closes the gripper, lifts the ball, carries it above the box, and releases it. This repeats for all 3 balls, then the arm returns to home position.
+1. `robot_driver` randomly places 3 strawberry models within a reachable workspace, avoiding the box area. Each strawberry consists of a red fruit and a green stem.
+2. The strawberry positions are published to `target_position`.
+3. `camera_publisher` maps the physical position to pixel coordinates and draws the strawberries on a synthetic image.
+4. `vision_to_arm` detects the red fruit and sends a grasp command.
+5. `robot_driver` opens the gripper, moves through three waypoints to the stem, closes the gripper, lifts the strawberry, carries it above the box, and releases it. This repeats for all 3 strawberries, then the arm returns to home position.
 
 ## Known Limitations
 
