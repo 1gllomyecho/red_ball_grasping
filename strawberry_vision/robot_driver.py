@@ -16,6 +16,13 @@ class RobotDriver(Node):
         self.state_publisher = self.create_publisher(String, 'arm_state', 10)
         self.position_publisher = self.create_publisher(String, 'target_position', 10)
 
+        # ===== 相机内参 =====
+        self.fx = 50.0
+        self.fy = 50.0
+        self.cx = 160.0
+        self.cy = 120.0
+        self.fixed_z = 0.35
+
         p.connect(p.GUI)
         p.setGravity(0, 0, -9.81)
         p.setTimeStep(1.0 / 240.0)
@@ -55,8 +62,9 @@ class RobotDriver(Node):
         self.box_pos = box_pos
         self.box_length = box_length
         self.box_width = box_width
+        self.box_height = box_height
 
-        # ===== Random strawberry positions =====
+        # ===== 随机草莓位置 =====
         self.ball_positions = []
         while len(self.ball_positions) < 3:
             x = random.uniform(0.4, 0.6)
@@ -78,7 +86,7 @@ class RobotDriver(Node):
 
         self.target_pos = self.ball_positions[0]
 
-        # ===== Create strawberries (fruit + stem), fruit fixed to world =====
+        # ===== 创建草莓 =====
         self.ball_ids = []
         self.stem_ids = []
         self.fix_constraints = []
@@ -89,7 +97,6 @@ class RobotDriver(Node):
             fruit_id = p.createMultiBody(0.1, fruit_collision, fruit_visual, basePosition=pos)
             p.changeDynamics(fruit_id, -1, linearDamping=0.9, angularDamping=0.9)
 
-            # Stem radius 5mm
             stem_visual = p.createVisualShape(p.GEOM_CYLINDER, radius=0.005, length=0.04, rgbaColor=[0, 1, 0, 1])
             stem_collision = p.createCollisionShape(p.GEOM_CYLINDER, radius=0.005, height=0.04)
             stem_pos = [pos[0], pos[1], pos[2] + 0.05]
@@ -131,11 +138,48 @@ class RobotDriver(Node):
         self.grasping = False
         self.success_count = 0
         self.fail_count = 0
+        self.current_ball_index = 0
+        self.last_pixel = None   # 记录上次收到的像素
 
-        pos_msg = String()
-        pos_msg.data = str(self.target_pos)
-        self.position_publisher.publish(pos_msg)
-        self.get_logger().info(f'First strawberry position: {self.target_pos}')
+        self.send_stem_to_camera(self.current_ball_index)
+
+    def send_stem_to_camera(self, ball_index):
+        ball_pos = self.ball_positions[ball_index]
+        stem_world = [ball_pos[0], ball_pos[1], ball_pos[2] + 0.05]
+        msg = String()
+        msg.data = str(stem_world)
+        self.position_publisher.publish(msg)
+        self.get_logger().info(f'Sent stem to camera for ball {ball_index}: {stem_world}')
+
+    def pixel_to_world(self, u, v):
+        Z = self.fixed_z
+        X = (u - self.cx) * Z / self.fx
+        Y = (v - self.cy) * Z / self.fy
+        return np.array([X, Y, Z])
+
+    def check_joint_limits(self, joint_angles):
+        for i in range(7):
+            info = p.getJointInfo(self.robot_id, i)
+            lower = info[8]
+            upper = info[9]
+            if joint_angles[i] < lower - 0.01 or joint_angles[i] > upper + 0.01:
+                self.get_logger().warn(f'Joint {i} angle {joint_angles[i]} out of limits [{lower}, {upper}]')
+                return False
+        return True
+
+    def move_to_cartesian(self, target_pos, orn, gripper_target=0.0):
+        current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
+        joint_angles = p.calculateInverseKinematics(
+            self.robot_id, 6, target_pos, orn,
+            restPoses=current,
+            maxNumIterations=200,
+            residualThreshold=1e-5
+        )
+        if not self.check_joint_limits(joint_angles):
+            self.get_logger().error(f'IK failed for target {target_pos}')
+            return False
+        self.move_to(joint_angles, gripper_target=gripper_target)
+        return True
 
     def move_to(self, joint_angles, steps=150, gripper_target=0.0):
         current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
@@ -157,134 +201,125 @@ class RobotDriver(Node):
         stem_pos = [ball_pos[0], ball_pos[1], ball_pos[2] + 0.05]
         return [
             np.array([stem_pos[0], stem_pos[1], stem_pos[2] + 0.3]),
-            np.array([stem_pos[0], stem_pos[1], stem_pos[2] + 0.25]),
-            np.array([stem_pos[0], stem_pos[1], stem_pos[2] + 0.18]),
+            np.array([stem_pos[0], stem_pos[1], stem_pos[2] + 0.15]),
+            np.array([stem_pos[0], stem_pos[1], stem_pos[2] + 0.14]),
         ]
 
     def command_callback(self, msg):
-        if msg.data == "grasp" and not self.grasping:
-            self.grasping = True
-            self.get_logger().info('Received grasp command, starting execution')
+        if self.grasping:
+            return
+        try:
+            u_str, v_str = msg.data.split(',')
+            u = float(u_str)
+            v = float(v_str)
+        except Exception as e:
+            self.get_logger().warn(f'Failed to parse pixel coords: {e}')
+            return
 
-            orn = p.getQuaternionFromEuler([math.pi, 0, 0])
+        # 如果像素和上次一样，说明是旧像素，忽略
+        if self.last_pixel is not None and abs(u - self.last_pixel[0]) < 1.0 and abs(v - self.last_pixel[1]) < 1.0:
+            self.get_logger().info(f'Ignoring duplicate pixel ({u:.2f}, {v:.2f})')
+            return
+        self.last_pixel = (u, v)
 
-            for ball_index, ball_pos in enumerate(self.ball_positions):
-                self.get_logger().info(f'=== Grasping strawberry {ball_index + 1} at {ball_pos} ===')
-                self.target_pos = ball_pos
+        self.grasping = True
+        self.get_logger().info(f'[1] Received pixel ({u:.2f}, {v:.2f})')
 
-                # Pre-approach
-                pre_pos = np.array([ball_pos[0], ball_pos[1], ball_pos[2] + 0.35])
-                current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
-                joint_angles = p.calculateInverseKinematics(
-                    self.robot_id, 6, pre_pos, orn,
-                    restPoses=current,
-                    maxNumIterations=200,
-                    residualThreshold=1e-5
-                )
-                self.move_to(joint_angles, gripper_target=-0.05)
+        ball_pos = self.pixel_to_world(u, v)
+        self.get_logger().info(f'Pixel -> world: {ball_pos}')
 
-                # Open gripper
-                for _ in range(50):
-                    p.setJointMotorControl2(self.robot_id, 8, p.POSITION_CONTROL,
-                                            targetPosition=-0.05, force=500)
-                    p.setJointMotorControl2(self.robot_id, 9, p.POSITION_CONTROL,
-                                            targetPosition=0.05, force=500)
-                    p.stepSimulation()
-                    time.sleep(1.0 / 240.0)
+        ball_index = self.current_ball_index
+        orn = p.getQuaternionFromEuler([math.pi, 0, 0])
 
-                waypoints = self.get_waypoints(ball_pos)
-                for wp in waypoints:
-                    current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
-                    joint_angles = p.calculateInverseKinematics(
-                        self.robot_id, 6, wp, orn,
-                        restPoses=current,
-                        maxNumIterations=200,
-                        residualThreshold=1e-5
-                    )
-                    self.move_to(joint_angles, gripper_target=-0.05)
+        self.get_logger().info(f'=== Grasping strawberry {ball_index + 1} at {ball_pos} ===')
+        self.target_pos = ball_pos
 
-                # Close gripper
-                for _ in range(100):
-                    p.setJointMotorControl2(self.robot_id, 8, p.POSITION_CONTROL,
-                                            targetPosition=0.0, force=500)
-                    p.setJointMotorControl2(self.robot_id, 9, p.POSITION_CONTROL,
-                                            targetPosition=0.0, force=500)
-                    p.stepSimulation()
-                    time.sleep(1.0 / 240.0)
+        pre_pos = np.array([ball_pos[0], ball_pos[1], ball_pos[2] + 0.35])
+        if not self.move_to_cartesian(pre_pos, orn, gripper_target=-0.05):
+            self.get_logger().error('Pre-approach failed, aborting')
+            self.grasping = False
+            return
 
-                # Check distance from finger joints to STEM
-                left_pos = p.getLinkState(self.robot_id, 8)[0]
-                right_pos = p.getLinkState(self.robot_id, 9)[0]
-                stem_pos_now, _ = p.getBasePositionAndOrientation(self.stem_ids[ball_index])
+        for _ in range(50):
+            p.setJointMotorControl2(self.robot_id, 8, p.POSITION_CONTROL, targetPosition=-0.05, force=500)
+            p.setJointMotorControl2(self.robot_id, 9, p.POSITION_CONTROL, targetPosition=0.05, force=500)
+            p.stepSimulation()
+            time.sleep(1.0 / 240.0)
 
-                d_left = np.linalg.norm(np.array(left_pos) - np.array(stem_pos_now))
-                d_right = np.linalg.norm(np.array(right_pos) - np.array(stem_pos_now))
-                distance = (d_left + d_right) / 2
+        waypoints = self.get_waypoints(ball_pos)
+        for wp in waypoints:
+            if not self.move_to_cartesian(wp, orn, gripper_target=-0.05):
+                self.get_logger().error(f'Waypoint {wp} failed, aborting')
+                self.grasping = False
+                return
 
-                if distance < 0.1:
-                    self.success_count += 1
-                    self.get_logger().info(f'Strawberry {ball_index + 1} grasped successfully')
-                    p.removeConstraint(self.fix_constraints[ball_index])
-                else:
-                    self.fail_count += 1
-                    self.get_logger().info(f'Strawberry {ball_index + 1} grasp failed')
+        for _ in range(50):
+            p.setJointMotorControl2(self.robot_id, 8, p.POSITION_CONTROL, targetPosition=0.0, force=500)
+            p.setJointMotorControl2(self.robot_id, 9, p.POSITION_CONTROL, targetPosition=0.0, force=500)
+            p.stepSimulation()
+            time.sleep(1.0 / 240.0)
 
-                # Lift
-                # Lift
-                lift_pos = np.array([ball_pos[0], ball_pos[1], ball_pos[2] + 0.25])
-                current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
-                joint_angles = p.calculateInverseKinematics(
-                    self.robot_id, 6, lift_pos, orn,
-                    restPoses=current,
-                    maxNumIterations=200,
-                    residualThreshold=1e-5
-                )
-                self.move_to(joint_angles, gripper_target=0.0)
+        left_pos = p.getLinkState(self.robot_id, 8)[0]
+        right_pos = p.getLinkState(self.robot_id, 9)[0]
+        stem_pos_now, _ = p.getBasePositionAndOrientation(self.stem_ids[ball_index])
 
-                # Extra lift: go straight up
-                extra_lift = np.array([ball_pos[0], ball_pos[1], ball_pos[2] + 0.4])
-                current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
-                joint_angles = p.calculateInverseKinematics(
-                    self.robot_id, 6, extra_lift, orn,
-                    restPoses=current,
-                    maxNumIterations=200,
-                    residualThreshold=1e-5
-                )
-                self.move_to(joint_angles, gripper_target=0.0)
+        d_left = np.linalg.norm(np.array(left_pos) - np.array(stem_pos_now))
+        d_right = np.linalg.norm(np.array(right_pos) - np.array(stem_pos_now))
+        distance = (d_left + d_right) / 2
 
-                # Step 1: Move to high above box
-                box_high = np.array([self.box_pos[0], self.box_pos[1], self.box_pos[2] + 0.4])
-                current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
-                joint_angles = p.calculateInverseKinematics(
-                    self.robot_id, 6, box_high, orn,
-                    restPoses=current,
-                    maxNumIterations=200,
-                    residualThreshold=1e-5
-                )
-                self.move_to(joint_angles, gripper_target=0.0)
-                # Step 2: Lower to above box opening
-                box_drop = np.array([self.box_pos[0], self.box_pos[1], self.box_pos[2] + 0.325])
-                current = [p.getJointState(self.robot_id, i)[0] for i in range(7)]
-                joint_angles = p.calculateInverseKinematics(
-                    self.robot_id, 6, box_drop, orn,
-                    restPoses=current,
-                    maxNumIterations=200,
-                    residualThreshold=1e-5
-                )
-                self.move_to(joint_angles, gripper_target=0.0)
+        self.get_logger().info(f'[2] Grasp check done, distance={distance:.3f}')
 
-                # Open gripper to release
-                for _ in range(50):
-                    p.setJointMotorControl2(self.robot_id, 8, p.POSITION_CONTROL,
-                                            targetPosition=-0.05, force=500)
-                    p.setJointMotorControl2(self.robot_id, 9, p.POSITION_CONTROL,
-                                            targetPosition=0.05, force=500)
-                    p.stepSimulation()
-                    time.sleep(1.0 / 240.0)
+        if distance < 0.1:
+            self.success_count += 1
+            self.get_logger().info(f'Strawberry {ball_index + 1} grasped successfully')
+            p.removeConstraint(self.fix_constraints[ball_index])
+        else:
+            self.fail_count += 1
+            self.get_logger().info(f'Strawberry {ball_index + 1} grasp failed')
 
+        lift_pos = np.array([ball_pos[0], ball_pos[1], ball_pos[2] + 0.25])
+        if not self.move_to_cartesian(lift_pos, orn, gripper_target=0.0):
+            self.get_logger().error('Lift failed, aborting')
+            self.grasping = False
+            return
+        self.get_logger().info(f'[3] Lift done')
+
+        extra_lift = np.array([ball_pos[0], ball_pos[1], ball_pos[2] + 0.25])
+        if not self.move_to_cartesian(extra_lift, orn, gripper_target=0.0):
+            self.get_logger().error('Extra lift failed, aborting')
+            self.grasping = False
+            return
+        self.get_logger().info(f'[4] Extra lift done')
+
+        box_high = np.array([self.box_pos[0], self.box_pos[1], self.box_pos[2] + 0.4])
+        if not self.move_to_cartesian(box_high, orn, gripper_target=0.0):
+            self.get_logger().error('Box high failed, aborting')
+            self.grasping = False
+            return
+        self.get_logger().info(f'[5] Box high done')
+
+        box_drop = np.array([self.box_pos[0], self.box_pos[1], self.box_pos[2] + 0.325])
+        if not self.move_to_cartesian(box_drop, orn, gripper_target=0.0):
+            self.get_logger().error('Box drop failed, aborting')
+            self.grasping = False
+            return
+        self.get_logger().info(f'[6] Box drop done')
+
+        for _ in range(50):
+            p.setJointMotorControl2(self.robot_id, 8, p.POSITION_CONTROL, targetPosition=-0.05, force=500)
+            p.setJointMotorControl2(self.robot_id, 9, p.POSITION_CONTROL, targetPosition=0.05, force=500)
+            p.stepSimulation()
+            time.sleep(1.0 / 240.0)
+
+        self.get_logger().info(f'[7] Ball {ball_index} finished, moving to next')
+
+        self.current_ball_index += 1
+        if self.current_ball_index < len(self.ball_positions):
+            self.send_stem_to_camera(self.current_ball_index)
+            self.grasping = False
+        else:
             self.get_logger().info('Returning to home position')
             self.move_to(self.home_joint_angles, gripper_target=0.0)
-
             self.get_logger().info(f'=== Summary: {self.success_count} success, {self.fail_count} fail ===')
 
             state = p.getLinkState(self.robot_id, 6)
