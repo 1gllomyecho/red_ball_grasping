@@ -21,8 +21,9 @@ class CameraPublisher(Node):
         self.cy = 120.0
 
         # ===== 果柄的物理坐标（由 robot_driver 发过来）=====
-        # 默认值：图像中心附近，避免第一帧报错
-        self.stem_world = [0.5, 0.0, 0.35]
+        # None = 还没收到。绝不能给默认值：[0.5, 0.0, 0.35] 会在第一帧
+        # 画出一个不存在的目标，机械臂照着抓就是空抓。
+        self.stem_world = None
 
         self.subscription = self.create_subscription(
             String, 'target_position', self.position_callback, 10
@@ -47,6 +48,10 @@ class CameraPublisher(Node):
         return int(round(u)), int(round(v))
 
     def timer_callback(self):
+        # 还没收到果柄坐标：一帧都不发。发了就是假像素。
+        if self.stem_world is None:
+            return
+
         img = np.zeros((240, 320, 3), dtype=np.uint8)
 
         pixel = self.project(self.stem_world)
